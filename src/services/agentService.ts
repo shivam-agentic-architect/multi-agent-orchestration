@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { db } from "../lib/firebase";
-import { collection, addDoc, serverTimestamp, getDocs, query, where, doc, updateDoc } from "firebase/firestore";
+import { collection, addDoc, serverTimestamp, getDocs, doc, setDoc } from "firebase/firestore";
+import { handleFirestoreError, OperationType } from "../lib/firestoreUtils";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
@@ -83,18 +84,25 @@ export const AGENTS: Record<string, Agent> = {
 
 export class Orchestrator {
   static async runRiskAnalysis(projectId: string) {
-    // Get all data
-    const reqCol = collection(db, "projects", projectId, "requirements");
-    const taskCol = collection(db, "projects", projectId, "tasks");
-    
-    const [reqSnap, taskSnap] = await Promise.all([getDocs(reqCol), getDocs(taskCol)]);
-    const requirements = reqSnap.docs.map(d => d.data());
-    const tasks = taskSnap.docs.map(d => d.data());
-
-    const model = "gemini-3-flash-preview";
-    const prompt = AGENTS.risk.promptTemplate.replace("{{data}}", JSON.stringify({ requirements, tasks }));
+    const reqPath = `projects/${projectId}/requirements`;
+    const taskPath = `projects/${projectId}/tasks`;
+    const msgPath = `projects/${projectId}/messages`;
 
     try {
+      const reqCol = collection(db, "projects", projectId, "requirements");
+      const taskCol = collection(db, "projects", projectId, "tasks");
+      
+      const [reqSnap, taskSnap] = await Promise.all([
+        getDocs(reqCol).catch(e => handleFirestoreError(e, OperationType.LIST, reqPath)),
+        getDocs(taskCol).catch(e => handleFirestoreError(e, OperationType.LIST, taskPath))
+      ]);
+      
+      const requirements = reqSnap.docs.map(d => d.data());
+      const tasks = taskSnap.docs.map(d => d.data());
+
+      const model = "gemini-3-flash-preview";
+      const prompt = AGENTS.risk.promptTemplate.replace("{{data}}", JSON.stringify({ requirements, tasks }));
+
       const response = await ai.models.generateContent({
         model,
         contents: prompt,
@@ -121,13 +129,12 @@ export class Orchestrator {
 
       const data = JSON.parse(response.text || "{}");
       
-      // Log activity
       await addDoc(collection(db, "projects", projectId, "messages"), {
         fromAgent: "Risk Agent",
         content: `Assessed ${data.risks.length} potential delivery risks with mitigation strategies.`,
         timestamp: serverTimestamp(),
         payload: data
-      });
+      }).catch(e => handleFirestoreError(e, OperationType.WRITE, msgPath));
 
       return data;
     } catch (error) {
@@ -137,10 +144,13 @@ export class Orchestrator {
   }
 
   static async runRequirementAnalysis(projectId: string, input: string) {
-    const model = "gemini-3-flash-preview";
-    const prompt = AGENTS.requirement.promptTemplate.replace("{{input}}", input);
+    const reqPath = `projects/${projectId}/requirements`;
+    const msgPath = `projects/${projectId}/messages`;
 
     try {
+      const model = "gemini-3-flash-preview";
+      const prompt = AGENTS.requirement.promptTemplate.replace("{{input}}", input);
+
       const response = await ai.models.generateContent({
         model,
         contents: prompt,
@@ -167,9 +177,8 @@ export class Orchestrator {
       });
 
       const data = JSON.parse(response.text || "{}");
-      
-      // Persist to Firestore
       const reqCol = collection(db, "projects", projectId, "requirements");
+      
       for (const req of data.requirements) {
         await addDoc(reqCol, {
           ...req,
@@ -177,15 +186,14 @@ export class Orchestrator {
           status: "approved",
           aiAnalysis: data.analysis,
           createdAt: serverTimestamp()
-        });
+        }).catch(e => handleFirestoreError(e, OperationType.WRITE, reqPath));
       }
 
-      // Log activity
       await addDoc(collection(db, "projects", projectId, "messages"), {
         fromAgent: "Requirement Agent",
-        content: `Extracted ${data.requirements.length} requirements.`,
+        content: `Extracted ${data.requirements.length} requirements. Architectural Vision: ${data.analysis}`,
         timestamp: serverTimestamp()
-      });
+      }).catch(e => handleFirestoreError(e, OperationType.WRITE, msgPath));
 
       return data;
     } catch (error) {
@@ -195,15 +203,18 @@ export class Orchestrator {
   }
 
   static async runSprintPlanning(projectId: string) {
-    // Get requirements from Firestore
-    const reqCol = collection(db, "projects", projectId, "requirements");
-    const snapshot = await getDocs(reqCol);
-    const requirements = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-
-    const model = "gemini-3-flash-preview";
-    const prompt = AGENTS.planning.promptTemplate.replace("{{requirements}}", JSON.stringify(requirements));
+    const reqPath = `projects/${projectId}/requirements`;
+    const taskPath = `projects/${projectId}/tasks`;
+    const msgPath = `projects/${projectId}/messages`;
 
     try {
+      const reqCol = collection(db, "projects", projectId, "requirements");
+      const snapshot = await getDocs(reqCol).catch(e => handleFirestoreError(e, OperationType.LIST, reqPath));
+      const requirements = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      const model = "gemini-3-flash-preview";
+      const prompt = AGENTS.planning.promptTemplate.replace("{{requirements}}", JSON.stringify(requirements));
+
       const response = await ai.models.generateContent({
         model,
         contents: prompt,
@@ -230,24 +241,22 @@ export class Orchestrator {
       });
 
       const data = JSON.parse(response.text || "{}");
-      
-      // Persist tasks
       const taskCol = collection(db, "projects", projectId, "tasks");
+      
       for (const task of data.tasks) {
         await addDoc(taskCol, {
           ...task,
           projectId,
           status: "todo",
           createdAt: serverTimestamp()
-        });
+        }).catch(e => handleFirestoreError(e, OperationType.WRITE, taskPath));
       }
 
-      // Log activity
       await addDoc(collection(db, "projects", projectId, "messages"), {
         fromAgent: "Planning Agent",
         content: `Generated sprint plan with ${data.tasks.length} tasks.`,
         timestamp: serverTimestamp()
-      });
+      }).catch(e => handleFirestoreError(e, OperationType.WRITE, msgPath));
 
       return data;
     } catch (error) {
@@ -256,3 +265,4 @@ export class Orchestrator {
     }
   }
 }
+

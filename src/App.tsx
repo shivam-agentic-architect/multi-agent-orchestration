@@ -19,12 +19,17 @@ import {
   AlertCircle,
   MessageSquare,
   Activity,
-  History
+  History,
+  XCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { collection, onSnapshot, query, orderBy, addDoc, serverTimestamp, setDoc, doc } from 'firebase/firestore';
-import { db } from './lib/firebase';
+import { collection, onSnapshot, query, orderBy, serverTimestamp, setDoc, doc, getDocFromServer } from 'firebase/firestore';
+import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User, signOut } from 'firebase/auth';
+import { db, auth } from './lib/firebase';
 import { Orchestrator, AGENTS } from './services/agentService';
+import { handleFirestoreError, OperationType } from './lib/firestoreUtils';
+
+const provider = new GoogleAuthProvider();
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -35,6 +40,9 @@ function cn(...inputs: ClassValue[]) {
 export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [userInput, setUserInput] = useState("");
   const [requirements, setRequirements] = useState<any[]>([]);
   const [tasks, setTasks] = useState<any[]>([]);
@@ -42,19 +50,67 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'overview' | 'requirements' | 'plan' | 'logs'>('overview');
 
   useEffect(() => {
+    async function testConnection() {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if(error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration.");
+          setError("Infrastructure Offline: Check Firebase settings.");
+        }
+      }
+    }
+    testConnection();
+
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+    });
+
+    return () => unsub();
+  }, []);
+
+  const handleLogin = async () => {
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (err: any) {
+      console.error("Login error:", err);
+      setError(`Authentication Failed: ${err.message}`);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setProjectId(null);
+    } catch (err: any) {
+      console.error("Logout error:", err);
+    }
+  };
+
+  useEffect(() => {
     if (!projectId) return;
 
     // Real-time listeners
+    const reqPath = `projects/${projectId}/requirements`;
+    const taskPath = `projects/${projectId}/tasks`;
+    const msgPath = `projects/${projectId}/messages`;
+
     const unsubReq = onSnapshot(collection(db, "projects", projectId, "requirements"), (snapshot) => {
       setRequirements(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, reqPath);
     });
 
     const unsubTasks = onSnapshot(collection(db, "projects", projectId, "tasks"), (snapshot) => {
       setTasks(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, taskPath);
     });
 
     const unsubMsgs = onSnapshot(query(collection(db, "projects", projectId, "messages"), orderBy("timestamp", "desc")), (snapshot) => {
       setMessages(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, msgPath);
     });
 
     return () => {
@@ -65,30 +121,49 @@ export default function App() {
   }, [projectId]);
 
   const handleStartProject = async () => {
-    if (!userInput.trim()) return;
+    if (!userInput.trim() || !user) return;
     setLoading(true);
+    setError(null);
+    const newProjectId = `proj_${Date.now()}`;
+    const projectPath = `projects/${newProjectId}`;
+    
     try {
-      const newProjectId = `proj_${Date.now()}`;
+      setStatusMessage("Initializing Project Registry...");
       await setDoc(doc(db, "projects", newProjectId), {
         name: "Enterprise Delivery",
         description: userInput,
         status: "active",
+        ownerId: user.uid,
         createdAt: serverTimestamp()
-      });
+      }).catch(e => handleFirestoreError(e, OperationType.WRITE, projectPath));
+
       setProjectId(newProjectId);
 
-      // Run Agents
+      setStatusMessage("Running Requirement Analysis (Requirement Agent)...");
       await Orchestrator.runRequirementAnalysis(newProjectId, userInput);
+      
+      setStatusMessage("Generating Sprint Plan (Planning Agent)...");
       await Orchestrator.runSprintPlanning(newProjectId);
+      
+      setStatusMessage("Performing Risk Assessment (Risk Agent)...");
       await Orchestrator.runRiskAnalysis(newProjectId);
       
+      setStatusMessage("");
       setActiveTab('requirements');
-    } catch (error) {
-      console.error("Error starting project:", error);
+    } catch (err: any) {
+      console.error("Error starting project:", err);
+      // Attempt to parse structured JSON error
+      try {
+        const parsed = JSON.parse(err.message);
+        setError(`System Error: ${parsed.error} (Path: ${parsed.path})`);
+      } catch {
+        setError(err.message || "An unexpected error occurred during agent orchestration.");
+      }
     } finally {
       setLoading(false);
     }
   };
+
 
   return (
     <div className="min-h-screen text-slate-100 font-sans selection:bg-indigo-500/30">
@@ -139,20 +214,65 @@ export default function App() {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"></span>
               Latency: 42ms
             </div>
+            {user && (
+              <>
+                <div className="h-8 w-px bg-white/10"></div>
+                <button 
+                  onClick={handleLogout}
+                  className="text-[10px] font-bold text-slate-500 hover:text-white uppercase tracking-widest transition-colors"
+                >
+                  Terminate Session
+                </button>
+              </>
+            )}
             <div className="h-8 w-px bg-white/10"></div>
             <div className="flex items-center gap-3">
                <div className="text-right">
-                 <p className="text-xs font-semibold leading-none text-white">SR-ARCH-902</p>
-                 <p className="text-[10px] text-slate-400">Senior Architect</p>
+                 <p className="text-xs font-semibold leading-none text-white">{user?.displayName || "UNAUTHORIZED"}</p>
+                 <p className="text-[10px] text-slate-400">{user ? "Active Agent" : "Access Denied"}</p>
                </div>
-               <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 border border-white/20 shadow-inner" />
+               {user?.photoURL ? (
+                 <img src={user.photoURL} className="w-9 h-9 rounded-full border border-white/20 shadow-inner" referrerPolicy="no-referrer" />
+               ) : (
+                 <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 border border-white/20 shadow-inner" />
+               )}
             </div>
           </div>
         </header>
 
         <div className="p-12 max-w-6xl mx-auto">
           <AnimatePresence mode="wait">
-            {!projectId ? (
+            {!user ? (
+              <motion.div 
+                key="login"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="flex flex-col items-center justify-center min-h-[60vh] space-y-8 text-center"
+              >
+                <div className="w-20 h-20 bg-indigo-500/10 rounded-3xl flex items-center justify-center border border-indigo-500/20 shadow-2xl shadow-indigo-500/20 mb-4">
+                  <Cpu className="w-10 h-10 text-indigo-400" />
+                </div>
+                <div className="space-y-4">
+                  <h2 className="text-5xl font-black tracking-tighter text-white">AUTHENTICATION REQUIRED</h2>
+                  <p className="text-slate-400 max-w-md mx-auto leading-relaxed">
+                    Access to the Multi-Agent Delivery Engine requires enterprise credentials. Please identify yourself to proceed.
+                  </p>
+                </div>
+                <button 
+                  onClick={handleLogin}
+                  className="px-10 py-4 bg-white text-slate-900 font-black rounded-2xl flex items-center gap-3 hover:bg-slate-100 transition-all shadow-xl shadow-white/10 group"
+                >
+                  <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" />
+                  AUTHORIZE WITH GOOGLE
+                </button>
+                {error && (
+                  <p className="text-rose-500 text-xs font-mono uppercase tracking-widest animate-pulse">
+                    !! ERROR: {error} !!
+                  </p>
+                )}
+              </motion.div>
+            ) : !projectId ? (
               <motion.div 
                 key="welcome"
                 initial={{ opacity: 0, y: 20 }}
@@ -183,13 +303,25 @@ export default function App() {
                       </div>
                       <button 
                         onClick={handleStartProject}
-                        disabled={loading || !userInput.trim()}
+                        disabled={loading || !userInput.trim() || !user}
                         className="px-8 py-3 bg-indigo-500 text-white font-bold rounded-xl flex items-center gap-2 hover:bg-indigo-600 transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50"
                       >
                         {loading ? <Loader2 className="animate-spin" size={20} /> : <Terminal size={20} />}
-                        Initiate AI Agents
+                        {loading ? "Agent Swarm Active..." : "Initiate AI Agents"}
                       </button>
                     </div>
+                    {statusMessage && (
+                      <p className="text-indigo-400 text-xs font-mono animate-pulse pt-2 text-center">
+                        &gt; {statusMessage}
+                      </p>
+                    )}
+                    {error && (
+                      <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl flex items-center gap-3 text-rose-500 text-sm">
+                        <XCircle size={18} />
+                        <span className="flex-1">{error}</span>
+                        <button onClick={() => setError(null)} className="text-white/50 hover:text-white">Close</button>
+                      </div>
+                    )}
                   </div>
                 </div>
 
