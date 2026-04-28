@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Terminal, 
   Workflow, 
@@ -47,7 +47,8 @@ export default function App() {
   const [requirements, setRequirements] = useState<any[]>([]);
   const [tasks, setTasks] = useState<any[]>([]);
   const [messages, setMessages] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<'overview' | 'requirements' | 'plan' | 'logs'>('overview');
+  const [testCases, setTestCases] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'overview' | 'requirements' | 'plan' | 'qa' | 'logs'>('overview');
 
   useEffect(() => {
     async function testConnection() {
@@ -71,8 +72,13 @@ export default function App() {
 
   const handleLogin = async () => {
     try {
+      setError(null);
       await signInWithPopup(auth, provider);
     } catch (err: any) {
+      if (err.code === 'auth/popup-closed-by-user') {
+        // User closed the popup, no need to show a loud error
+        return;
+      }
       console.error("Login error:", err);
       setError(`Authentication Failed: ${err.message}`);
     }
@@ -164,6 +170,23 @@ export default function App() {
     }
   };
 
+  const handleRunQA = async () => {
+    if (!projectId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      setStatusMessage("Generating Test Specifications (QA Agent)...");
+      const data = await Orchestrator.runQATesting(projectId);
+      setTestCases(data.testcases);
+      setStatusMessage("");
+      setActiveTab('qa');
+    } catch (err: any) {
+      setError(err.message || "Failed to generate test cases.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
 
   return (
     <div className="min-h-screen text-slate-100 font-sans selection:bg-indigo-500/30">
@@ -183,10 +206,20 @@ export default function App() {
           <NavButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} icon={<Layout size={18} />} label="System Overview" />
           <NavButton active={activeTab === 'requirements'} onClick={() => setActiveTab('requirements')} icon={<Workflow size={18} />} label="Requirements" />
           <NavButton active={activeTab === 'plan'} onClick={() => setActiveTab('plan')} icon={<BarChart3 size={18} />} label="Sprint Planning" />
+          <NavButton active={activeTab === 'qa'} onClick={() => setActiveTab('qa')} icon={<TestTube2 size={18} />} label="QA Suite" />
           <NavButton active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} icon={<History size={18} />} label="Agent Activity" />
         </div>
 
-        <div className="absolute bottom-10 left-6 right-6">
+        <div className="absolute bottom-10 left-6 right-6 space-y-4">
+          {user && (
+            <button 
+              onClick={handleLogout}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:bg-white/10 transition-all text-[10px] font-bold uppercase tracking-widest"
+            >
+              <History size={14} className="rotate-180" />
+              Sign Out
+            </button>
+          )}
           <div className="p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs text-center space-y-2 backdrop-blur-sm">
             <p className="font-semibold uppercase tracking-tighter">System Health</p>
             <div className="flex items-center justify-center gap-2">
@@ -221,7 +254,7 @@ export default function App() {
                   onClick={handleLogout}
                   className="text-[10px] font-bold text-slate-500 hover:text-white uppercase tracking-widest transition-colors"
                 >
-                  Terminate Session
+                  Log Out
                 </button>
               </>
             )}
@@ -449,12 +482,83 @@ export default function App() {
                           </span>
                         </div>
                         <p className="text-sm text-slate-400 mb-6 leading-relaxed font-medium">{req.description}</p>
-                        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-500 group-hover:text-slate-300 transition-colors">
-                          <CheckCircle2 size={12} className="text-emerald-500" />
-                          Validated Agent Schema
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-500 group-hover:text-slate-300 transition-colors">
+                            <CheckCircle2 size={12} className="text-emerald-500" />
+                            Validated Agent Schema
+                          </div>
+                          <button className="text-[10px] font-black text-indigo-400 hover:text-indigo-300 uppercase underline decoration-indigo-500/20 underline-offset-4">
+                            Details
+                          </button>
                         </div>
                       </motion.div>
                     ))}
+                  </div>
+                )}
+
+                {activeTab === 'qa' && (
+                  <div className="space-y-8">
+                     <div className="flex items-center justify-between mb-8">
+                       <div>
+                          <h3 className="text-2xl font-bold text-white uppercase tracking-tighter">Enterprise QA Suite</h3>
+                          <p className="text-xs text-slate-500 font-medium mt-1">Generated by QA Agent (Test Architect)</p>
+                       </div>
+                       <button 
+                        onClick={handleRunQA}
+                        disabled={loading}
+                        className="flex items-center gap-2 px-6 py-2.5 bg-indigo-500/10 border border-indigo-500/30 rounded-xl text-indigo-400 font-bold uppercase tracking-widest text-[10px] hover:bg-indigo-500/20 transition-all disabled:opacity-50"
+                       >
+                          {loading ? <Loader2 className="animate-spin" size={14} /> : <TestTube2 size={14} />}
+                          Regenerate Test Pack
+                       </button>
+                     </div>
+
+                     {testCases.length === 0 && !loading && (
+                       <div className="p-20 text-center space-y-6 border-2 border-dashed border-white/5 rounded-3xl">
+                          <div className="w-16 h-16 bg-white/5 rounded-2xl flex items-center justify-center mx-auto text-slate-500">
+                             <TestTube2 size={32} />
+                          </div>
+                          <div className="space-y-2">
+                             <h4 className="text-xl font-bold text-white uppercase tracking-tight">No Test Cases Identified</h4>
+                             <p className="text-slate-500 text-sm max-w-sm mx-auto">Initiate the QA Agent to architect a comprehensive test suite for your delivery.</p>
+                          </div>
+                          <button 
+                            onClick={handleRunQA}
+                            className="px-8 py-3 bg-white text-slate-900 font-black rounded-xl hover:bg-slate-100 transition-all shadow-xl shadow-white/5"
+                          >
+                             INVOKE QA AGENT
+                          </button>
+                       </div>
+                     )}
+
+                     <div className="grid grid-cols-2 gap-6">
+                        {testCases.map((tc, i) => (
+                           <motion.div 
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: i * 0.1 }}
+                            key={i}
+                            className="p-8 bg-white/5 border border-white/10 backdrop-blur-md rounded-2xl space-y-4 hover:border-indigo-500/20 transition-all"
+                           >
+                              <div className="flex items-center gap-3 mb-2">
+                                 <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center text-indigo-500 border border-indigo-500/20">
+                                    <Terminal size={16} />
+                                 </div>
+                                 <h4 className="font-bold text-white uppercase tracking-tight text-sm flex-1">{tc.title}</h4>
+                              </div>
+                              <div className="space-y-4">
+                                 <div className="space-y-2">
+                                    <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Execution Steps</p>
+                                    <p className="text-xs text-slate-400 leading-relaxed font-medium bg-black/20 p-3 rounded-lg border border-white/5">{tc.steps}</p>
+                                 </div>
+                                 <div className="space-y-2">
+                                    <p className="text-[10px] font-black text-emerald-500/60 uppercase tracking-widest">Expected Outcome</p>
+                                    <p className="text-xs text-emerald-400/80 leading-relaxed font-bold bg-emerald-500/5 p-3 rounded-lg border border-emerald-500/10">{tc.expectedResult}</p>
+                                 </div>
+                              </div>
+                           </motion.div>
+                        ))}
+                     </div>
                   </div>
                 )}
 
@@ -478,7 +582,7 @@ export default function App() {
                         >
                           <div className="flex items-center gap-6">
                             <div className="w-10 h-10 rounded-lg bg-indigo-500/10 flex items-center justify-center text-slate-500 group-hover:text-indigo-400 transition-colors border border-indigo-500/20">
-                              {task.assigneeAgent === 'development' ? <Code2 size={20} /> : <TestTube2 size={20} />}
+                              {task.assignee === 'QA Agent' ? <TestTube2 size={20} /> : <Code2 size={20} />}
                             </div>
                             <div>
                               <h5 className="font-bold text-slate-100 mb-1 group-hover:text-white transition-colors">{task.title}</h5>
@@ -488,7 +592,7 @@ export default function App() {
                           <div className="flex items-center gap-6">
                              <div className="text-right">
                                 <p className="text-[10px] text-slate-600 font-bold tracking-widest uppercase mb-1">Executor</p>
-                                <p className="text-xs font-bold text-indigo-400/80 capitalize">{task.assigneeAgent} Agent</p>
+                                <p className="text-xs font-bold text-indigo-400/80 capitalize">{task.assignee || task.assigneeAgent || 'Unassigned'}</p>
                              </div>
                              <ChevronRight className="text-slate-700 group-hover:text-indigo-500 transition-colors" size={18} />
                           </div>

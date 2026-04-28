@@ -38,6 +38,7 @@
         "requirementId": { "type": "string" },
         "title": { "type": "string" },
         "description": { "type": "string" },
+        "assignee": { "type": "string" },
         "assigneeAgent": { "type": "string" },
         "status": { "type": "string", "enum": ["todo", "in_progress", "review", "done"] },
         "output": { "type": "string" },
